@@ -1,1 +1,6 @@
-fastapi, uvicorn, websockets, pandas, scikit-learn, numpy.
+fastapi
+uvicorn
+websockets
+pandas
+scikit-learn
+numpy
