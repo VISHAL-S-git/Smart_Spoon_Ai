@@ -34,7 +34,7 @@ from sklearn.neighbors import KNeighborsClassifier
 # ==============================================================================
 SERIAL_PORT = "COM11" # Update if your ESP32 changes ports
 BAUD_RATE = 9600
-CSV_DATASET = r"C:\proteus\Smart_Spoon_UI\Smart_spoon\smart_spoon_grand_finale_dataset (1) (1).csv"
+CSV_DATASET = "smart_spoon_grand_finale_dataset (1) (1).csv"
 LIVE_LOG_CSV = "smart_spoon_live_stream.csv"
 
 latest_payload = {}
