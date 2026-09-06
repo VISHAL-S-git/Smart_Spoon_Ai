@@ -1,13 +1,13 @@
 """
 =========================================================================================
-SMART SPOON AI & EIS ENGINE — THE GRAND FINALE (v14.1 - DSP WINDOWING + STANDBY)
+SMART SPOON AI & EIS ENGINE — THE GRAND FINALE (v14.1 - DSP WINDOWING + AWAITING DATA)
 =========================================================================================
 Modules Included:
 - 10-Sample Rolling Window (Median & Standard Deviation Analysis)
 - Signal Stability Matrix (Separates Overlapping Salt vs. Milk via Variance)
 - K-Nearest Neighbors (KNN) ML Inference Engine
 - Asynchronous FastAPI WebSocket Broadcaster
-- Professional "AWAITING SENSOR DATA" Standby Mode (Prevents false Water readings)
+- Awaiting Sensor Data Mode (Zero-Hz detection)
 =========================================================================================
 """
 
@@ -132,13 +132,13 @@ def compute_complete_telemetry(median_freq: float, live_z: float, temp_c: float)
     timestamp_str = time.strftime("%Y-%m-%d %H:%M:%S")
 
     # --- AWAITING DATA INTERCEPTOR ---
-    # If the frequency is extremely low (open air), trigger Standby Mode.
     is_awaiting = median_freq < 1000
 
     if is_awaiting:
         accuracy = 0.0
         prediction = "AWAITING SENSOR DATA..."
         prob_dist = {}
+        is_pure = is_spoiled = is_water = is_urea = is_salt = is_starch = is_detergent = False
     else:
         # --- KNN ML INFERENCE ---
         features = pd.DataFrame([[live_z, temp_c, median_freq]], columns=["Impedance_Ohms", "Temperature_C", "Frequency_Hz"])
@@ -148,13 +148,13 @@ def compute_complete_telemetry(median_freq: float, live_z: float, temp_c: float)
         accuracy = round(random.uniform(95.2, 99.8), 2)
         prob_dist = {label: round(float(prob) * 100, 1) for label, prob in zip(ml_model.classes_, probabilities)}
 
-    is_pure = "Pure" in prediction
-    is_spoiled = "Spoiled" in prediction
-    is_water = "Water" in prediction
-    is_urea = "Urea" in prediction
-    is_salt = "Salt" in prediction
-    is_starch = "Starch" in prediction
-    is_detergent = "Detergent" in prediction
+        is_pure = "Pure" in prediction
+        is_spoiled = "Spoiled" in prediction
+        is_water = "Water" in prediction
+        is_urea = "Urea" in prediction
+        is_salt = "Salt" in prediction
+        is_starch = "Starch" in prediction
+        is_detergent = "Detergent" in prediction
 
     # --- ELECTROCHEMICAL & PHYSICAL DERIVATIONS ---
     if is_awaiting:
@@ -206,14 +206,14 @@ def compute_complete_telemetry(median_freq: float, live_z: float, temp_c: float)
         snf_pct = round(float(np.clip(8.5 - (water_dilution_pct * 0.08), 3.0, 9.2)), 2)
         procurement_price = round(max(0.0, (fat_pct * 6.5) + (snf_pct * 4.0) - (water_dilution_pct * 0.5)), 2)
 
-    status_color = "#334155" if is_awaiting else ("#16a34a" if is_pure else ("#ea580c" if is_spoiled else "#dc2626"))
+    status_col = "#334155" if is_awaiting else ("#16a34a" if is_pure else ("#ea580c" if is_spoiled else "#dc2626"))
     adul_type = "AWAITING SENSOR DATA..." if is_awaiting else ("PURE MILK (UNADULTERATED)" if is_pure else prediction.replace("_", " ").upper())
 
     payload = {
         "hero": {
             "adulteration_type": adul_type,
             "accuracy": accuracy,
-            "status_color": status_color,
+            "status_color": status_col,
         },
         "primary": {
             "1_safety_score": safety_score,
@@ -299,7 +299,7 @@ def compute_complete_telemetry(median_freq: float, live_z: float, temp_c: float)
         },
     }
 
-    # Don't clutter the CSV with zeros when the spoon is sitting on the desk
+    # Only log to CSV if we actually have data (not awaiting)
     if not is_awaiting:
         with open(LIVE_LOG_CSV, mode="a", newline="") as f:
             writer = csv.writer(f)
