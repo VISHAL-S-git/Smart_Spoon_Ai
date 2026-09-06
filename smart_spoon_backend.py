@@ -1,11 +1,12 @@
 """
 =========================================================================================
-SMART SPOON AI & EIS ENGINE — THE GRAND FINALE (v15.0 - OUTLIER REJECTION)
+SMART SPOON AI & EIS ENGINE — THE GRAND FINALE (v16.0 - FAST DSP)
 =========================================================================================
 Modules Included:
-- Awaiting Sensor Data State (Zero-Input Handling)
-- 10-Sample Interquartile Trim (Deletes Top 2 & Bottom 2 Outliers)
-- Variance Overlap Solver (Separates Salt vs. Milk using Standard Deviation)
+- Awaiting Data Mode (Professional Grey UI when spoon is out of liquid)
+- 5-Sample Fast Rolling Window (5 seconds to result)
+- True Outlier Rejection (Deletes spikes >20% from median)
+- Signal Stability Matrix (Separates Overlapping Salt vs. Milk via Variance)
 - K-Nearest Neighbors (KNN) ML Inference Engine
 =========================================================================================
 """
@@ -28,12 +29,12 @@ from pydantic import BaseModel
 # ==============================================================================
 # 1. SYSTEM CONFIGURATION & GLOBAL BUFFERS
 # ==============================================================================
-CSV_DATASET = "smart_spoon_grand_finale_dataset (1) (1).csv"
+CSV_DATASET = "smart_spoon_grand_finale_dataset.csv"
 LIVE_LOG_CSV = "smart_spoon_live_stream.csv"
 
-# The 10-Sample Rolling Buffers
-freq_buffer = deque(maxlen=10)
-temp_buffer = deque(maxlen=10)
+# FAST 5-Sample Rolling Buffers (Reduces wait time to 5 seconds!)
+freq_buffer = deque(maxlen=5)
+temp_buffer = deque(maxlen=5)
 
 latest_payload = {}
 active_clients: list[WebSocket] = []
@@ -63,46 +64,52 @@ print("SMART SPOON AI ENGINE: INITIALIZING KNN TRAINING SEQUENCE...")
 print("=" * 70)
 
 # We map your specific Hardware Frequencies to exact CSV Impedance Ohms
+# Included the "Awaiting" state for when the spoon is out of the liquid
 X_synthetic = np.array([
     [1500, 25, 0],       # Open Air / Awaiting
-    [500, 25, 12000],    # Pure Milk
-    [850, 25, 17000],    # Adulterated Water Mix
-    [800, 25, 14000],    # Adulterated Starch
-    [1200, 25, 32000],   # Pure Water
-    [150, 25, 12600],    # Salt Milk
+    [500, 25, 12000], [510, 25, 12200],  # Pure Milk
+    [850, 25, 17000], [840, 25, 16500],  # Adulterated Water Mix
+    [800, 25, 14000], [810, 25, 13500],  # Adulterated Starch
+    [1200, 25, 32000], [1150, 25, 35000], # Pure Water
+    [150, 25, 12600], [160, 25, 12800],  # Salt Milk
     [90, 25, 100000],    # Urea / Toxins
     [350, 25, 10000],    # Ruined Milk
 ])
 y_synthetic = np.array([
     "Awaiting_Sensor_Data", 
-    "Pure_Milk", 
-    "Adulterated_Water", 
-    "Adulterated_Starch", 
-    "Adulterated_Water", 
-    "Adulterated_Salt", 
+    "Pure_Milk", "Pure_Milk",
+    "Adulterated_Water", "Adulterated_Water",
+    "Adulterated_Starch", "Adulterated_Starch",
+    "Adulterated_Water", "Adulterated_Water",
+    "Adulterated_Salt", "Adulterated_Salt",
     "Adulterated_Urea", 
     "Spoiled_Milk_Sour"
 ])
 
 ml_model = KNeighborsClassifier(n_neighbors=3, weights='distance')
 ml_model.fit(X_synthetic, y_synthetic)
-print("Hardware-Calibrated KNN model ready.")
+print("Hardware-Calibrated Fast-KNN model ready.")
 
 # ==============================================================================
-# 3. THE OUTLIER-REJECTION DSP MAPPER
+# 3. TRUE OUTLIER-REJECTION DSP MAPPER
 # ==============================================================================
 def apply_intelligent_metrology(freq_array) -> tuple:
     """
-    1. Sorts the 10 samples.
-    2. Drops the 2 highest and 2 lowest values (removes accidental hardware spikes).
-    3. Calculates the median and standard deviation of the remaining perfect 6.
-    4. Maps them rigidly to your exact hardware numbers.
+    1. Finds the initial median of the 5 samples.
+    2. Deletes ANY value that is > 20% different from the median (Real Outlier Rejection).
+    3. Analyzes the variance of the clean data to solve the Salt vs Milk overlap.
     """
-    sorted_freqs = sorted(freq_array)
-    if len(sorted_freqs) == 10:
-        clean_freqs = sorted_freqs[2:-2]  # Drop top 2 and bottom 2 outliers!
+    initial_median = np.median(freq_array)
+    
+    # Filter out real outliers (spikes that don't connect with the real data)
+    if initial_median > 0:
+        clean_freqs = [f for f in freq_array if abs(f - initial_median) / initial_median <= 0.20]
     else:
-        clean_freqs = sorted_freqs
+        clean_freqs = freq_array
+        
+    # Failsafe if everything was an outlier
+    if len(clean_freqs) == 0:
+        clean_freqs = freq_array
 
     median_freq = float(np.median(clean_freqs))
     std_dev = float(np.std(clean_freqs))
@@ -117,29 +124,18 @@ def apply_intelligent_metrology(freq_array) -> tuple:
 
     # RULE 3: The Overlap Solver (Pure Milk vs Salt)
     # Both sit around 11,200 to 13,200. We use variance (StdDev) to split them!
-    if 11200 <= median_freq <= 13200:
-        if std_dev < 1200:  # Salt dissolves evenly, creating highly stable signals
+    if 11200 <= median_freq <= 13500:
+        if std_dev < 1950:  # Salt dissolves evenly, creating highly stable signals
             return 150.0, median_freq
         else:               # Milk fat causes unstable signal bouncing
             return 500.0, median_freq
 
-    # RULE 4: Cornflour / Starch Mix
-    if 13200 < median_freq <= 15500:
-        return 800.0, median_freq
-
-    # RULE 5: Water + Milk Mix
-    if 15500 < median_freq <= 24000:
-        return 850.0, median_freq
-
-    # RULE 6: Pure Water
-    if 24000 < median_freq <= 60000:
-        return 1200.0, median_freq
-
-    # RULE 7: Urea / Extreme Toxins
-    if median_freq > 60000:
-        return 90.0, median_freq
-
-    return 1500.0, median_freq
+    # RULE 4: Hardware Interpolation Matrix
+    hardware_freqs = [0, 9500, 10300, 14000, 16500, 32000, 100000]
+    target_ohms =    [1500, 350, 350,  800,   850,   1200,  1500]
+    
+    mapped_z = np.interp(median_freq, hardware_freqs, target_ohms)
+    return float(mapped_z), median_freq
 
 # ==============================================================================
 # 4. TELEMETRY COMPUTATION ENGINE
@@ -164,6 +160,7 @@ def compute_complete_telemetry(median_freq: float, live_z: float, temp_c: float)
     is_urea = "Urea" in prediction
     is_salt = "Salt" in prediction
     is_starch = "Starch" in prediction
+    is_detergent = "Detergent" in prediction
 
     # --- ELECTROCHEMICAL DERIVATIONS ---
     if is_awaiting:
@@ -186,9 +183,9 @@ def compute_complete_telemetry(median_freq: float, live_z: float, temp_c: float)
         elif is_spoiled:
             milk_age_hrs = round(float(8.0 + (350 - min(350, live_z)) * 0.08), 1)
             ph_value = round(float(np.clip(5.8 - (milk_age_hrs * 0.08), 4.40, 5.90)), 2)
-        elif is_salt or is_urea:
+        elif is_salt or is_urea or is_detergent:
             milk_age_hrs = 1.0
-            ph_value = 7.45
+            ph_value = 8.90 if is_detergent else 7.45
         else:
             milk_age_hrs = 2.0
             ph_value = 6.70
@@ -227,8 +224,8 @@ def compute_complete_telemetry(median_freq: float, live_z: float, temp_c: float)
         "primary": {
             "1_safety_score": safety_score,
             "2_infant_safety_seal": "--" if is_awaiting else ("Safe for Baby Feeding" if is_pure else "UNSAFE FOR INFANTS"),
-            "3_chemical_toxicity": "--" if is_awaiting else ("TOXIC CHEMICAL HAZARD" if (is_urea or is_salt) else "Safe (No Toxins)"),
-            "4_boiling_necessity": "--" if is_awaiting else ("Safe to Drink Raw" if is_pure else ("Must Boil Thoroughly" if (is_water or is_starch) else "Do Not Boil")),
+            "3_chemical_toxicity": "--" if is_awaiting else ("TOXIC CHEMICAL HAZARD" if (is_urea or is_salt or is_detergent) else "Safe (No Toxins)"),
+            "4_boiling_necessity": "--" if is_awaiting else ("Safe to Drink Raw" if is_pure else ("Must Boil Thoroughly" if (is_water or is_starch) else "Do Not Boil (Spoiled)")),
             "5_lactose_sensitivity_risk": "--" if is_awaiting else ("High (Active Fermentation)" if ph_value < 6.3 else "Normal Digestion"),
             "6_curdle_predictor": "--" if is_awaiting else ("Will Curdle Instantly" if ph_value < 6.2 else "Heat Stable"),
             "7_chai_splitting_index": "--" if is_awaiting else ("Will Split in Tea/Coffee" if ph_value < 6.4 else "Perfect for Hot Beverages"),
@@ -283,13 +280,15 @@ def compute_complete_telemetry(median_freq: float, live_z: float, temp_c: float)
         },
     }
 
-    with open(LIVE_LOG_CSV, mode="a", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            timestamp_str, int(median_freq), round(live_z, 2),
-            payload["hero"]["adulteration_type"], accuracy,
-            ph_value, safety_score, fat_pct
-        ])
+    # Only log to CSV if we actually have data (not awaiting)
+    if not is_awaiting:
+        with open(LIVE_LOG_CSV, mode="a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                timestamp_str, int(median_freq), round(live_z, 2),
+                payload["hero"]["adulteration_type"], accuracy,
+                ph_value, safety_score, fat_pct
+            ])
 
     return payload
 
@@ -307,18 +306,18 @@ async def ingest_sensor_data(data: SensorData):
     freq = data.adc
     temp = data.temperature
     
-    # 1. Fill the 10-sample rolling buffer
+    # 1. Fill the Fast 5-sample rolling buffer
     freq_buffer.append(freq)
     temp_buffer.append(temp)
     
-    # 2. Wait until we have 10 samples to execute Outlier Rejection
-    if len(freq_buffer) < 10:
+    # 2. Wait until we have 5 samples (Only takes 5 seconds!)
+    if len(freq_buffer) < 5:
         return {"status": "buffering", "samples": len(freq_buffer)}
     
-    # 3. Calculate Trimmed Medians and execute the DSP Engine
     median_temp = float(np.median(temp_buffer))
     
-    live_z, processed_freq = apply_intelligent_metrology(freq_array=list(freq_buffer))
+    # 3. Calculate True Outlier-Free Median
+    live_z, processed_freq = apply_intelligent_metrology(list(freq_buffer))
 
     # 4. Generate the payload
     latest_payload = compute_complete_telemetry(median_freq=processed_freq, live_z=live_z, temp_c=median_temp)
@@ -337,7 +336,7 @@ async def websocket_stream_endpoint(websocket: WebSocket):
         while True:
             if latest_payload:
                 await websocket.send_text(json.dumps(latest_payload))
-            await asyncio.sleep(1.0) # Refresh UI once per second based on the rolling buffer
+            await asyncio.sleep(1.0) 
     except WebSocketDisconnect:
         active_clients.remove(websocket)
         print("\n[WEBSOCKET] React frontend disconnected.")
