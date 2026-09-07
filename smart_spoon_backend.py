@@ -1,12 +1,12 @@
 """
 =========================================================================================
-SMART SPOON EIS ENGINE — THE GRAND FINALE (v21.0 - ULTRA-FAST 5-SAMPLE ENGINE)
+SMART SPOON EIS ENGINE — THE GRAND FINALE (v21.0 - BUG FIXED)
 =========================================================================================
 Modules Included:
-- Instant Zero-Hz Memory Flush (Fixes getting stuck on "Awaiting Data")
-- 5-Sample Fast Rolling Window (Only 5 seconds to result)
-- True Deviation Outlier Filter (Deletes fake glitches, keeps real data)
+- 10-Sample Rolling Window (10 seconds to result)
+- Interquartile Outlier Rejection (Deletes Top 2 and Bottom 2 accidental spikes)
 - Pure If/Else Hardware Mapping (Zero overlapping, 100% stage reliability)
+- Awaiting Sensor Data Mode (Zero-Hz detection)
 =========================================================================================
 """
 
@@ -28,9 +28,9 @@ from pydantic import BaseModel
 # ==============================================================================
 LIVE_LOG_CSV = "smart_spoon_live_stream.csv"
 
-# FAST 5-Sample Rolling Buffers (Reduces wait time to 5 seconds!)
-freq_buffer = deque(maxlen=5)
-temp_buffer = deque(maxlen=5)
+# 10-Sample Rolling Buffers
+freq_buffer = deque(maxlen=10)
+temp_buffer = deque(maxlen=10)
 
 latest_payload = {}
 active_clients: list[WebSocket] = []
@@ -53,57 +53,41 @@ if not os.path.exists(LIVE_LOG_CSV):
         ])
 
 # ==============================================================================
-# 2. TRUE OUTLIER FILTER
-# ==============================================================================
-def filter_real_outliers(data_list):
-    """
-    Checks the 5 inputs. Calculates the core median.
-    Deletes any accidental hardware spike that deviates >25% from the core signal.
-    """
-    if len(data_list) < 3:
-        return data_list
-        
-    core_val = np.median(data_list)
-    if core_val == 0:
-        return data_list
-        
-    # Keep values strictly within a 25% deviation threshold (Removes wild glitches!)
-    clean_data = [x for x in data_list if abs(x - core_val) / core_val <= 0.25]
-    
-    # Failsafe: if the signal is entirely chaotic, return the original array
-    return clean_data if len(clean_data) > 0 else data_list
-
-# ==============================================================================
-# 3. RIGID IF/ELSE HARDWARE MAPPER
+# 2. RIGID IF/ELSE HARDWARE MAPPER
 # ==============================================================================
 def classify_and_map_impedance(median_freq: float) -> tuple:
     """
     Checks the filtered median frequency against your exact hardware boundaries.
     Guarantees no UI flapping and perfect separation.
     """
-    # RULE 1: Salt (Highly conductive, pulls frequency below 7000)
-    if median_freq < 7000:
+    
+    # RULE 1: Open Air / Electrodes far apart
+    if median_freq < 100:
+        return "Awaiting_Sensor_Data", 1500.0
+
+    # RULE 2: Salt (Highly conductive, pulls frequency low)
+    if median_freq < 7500:
         return "Adulterated_Salt", 150.0
 
-    # RULE 2: Starch (Thickens liquid, medium-low frequency)
-    elif 7000 <= median_freq < 9500:
+    # RULE 3: Starch (Thickens liquid, medium-low frequency)
+    elif 7500 <= median_freq < 9500:
         return "Adulterated_Starch", 800.0
 
-    # RULE 3: Pure Milk (Fat coating stabilizes around 9.5k - 16k)
-    elif 9500 <= median_freq < 16000:
+    # RULE 4: Pure Milk (Fat coating stabilizes around 9.5k - 20k)
+    elif 9500 <= median_freq < 20000:
         return "Pure_Milk", 500.0
 
-    # RULE 4: Water / Water+Milk Mix (Dilution causes massive frequency spikes > 16k)
+    # RULE 5: Water (Dilution causes massive frequency spikes > 20k)
     else: 
         return "Adulterated_Water", 1200.0
 
 # ==============================================================================
-# 4. TELEMETRY COMPUTATION ENGINE
+# 3. TELEMETRY COMPUTATION ENGINE
 # ==============================================================================
 def compute_complete_telemetry(median_freq: float, prediction: str, live_z: float, temp_c: float) -> dict:
     timestamp_str = time.strftime("%Y-%m-%d %H:%M:%S")
     
-    is_awaiting = "AWAITING" in prediction.upper()
+    is_awaiting = "Awaiting" in prediction
     
     # Generate ultra-professional confidence scores for the UI
     if is_awaiting:
@@ -118,6 +102,7 @@ def compute_complete_telemetry(median_freq: float, prediction: str, live_z: floa
     is_salt = "Salt" in prediction
     is_starch = "Starch" in prediction
     is_detergent = "Detergent" in prediction
+    is_mastitis = "Mastitis" in prediction  # <-- THIS WAS THE FATAL BUG! FIXED!
 
     # --- ELECTROCHEMICAL DERIVATIONS ---
     if is_awaiting:
@@ -170,7 +155,7 @@ def compute_complete_telemetry(median_freq: float, prediction: str, live_z: floa
         procurement_price = round(max(0.0, (fat_pct * 6.5) + (snf_pct * 4.0) - (water_dilution_pct * 0.5)), 2)
 
     status_color = "#334155" if is_awaiting else ("#16a34a" if is_pure else ("#ea580c" if is_spoiled else "#dc2626"))
-    adul_type = prediction if is_awaiting else ("PURE MILK (UNADULTERATED)" if is_pure else prediction.replace("_", " ").upper())
+    adul_type = "AWAITING SENSOR DATA..." if is_awaiting else ("PURE MILK (UNADULTERATED)" if is_pure else prediction.replace("_", " ").upper())
 
     payload = {
         "hero": {
@@ -262,7 +247,6 @@ def compute_complete_telemetry(median_freq: float, prediction: str, live_z: floa
         },
     }
 
-    # Only log to CSV if we actually have data (not awaiting)
     if not is_awaiting:
         with open(LIVE_LOG_CSV, mode="a", newline="") as f:
             writer = csv.writer(f)
@@ -275,7 +259,7 @@ def compute_complete_telemetry(median_freq: float, prediction: str, live_z: floa
     return payload
 
 # ==============================================================================
-# 5. THE CLOUD ESP32 INGESTION ENDPOINT
+# 5. THE CLOUD ESP32 INGESTION ENDPOINT (10-Sample Buffer)
 # ==============================================================================
 class SensorData(BaseModel):
     adc: int
@@ -288,33 +272,26 @@ async def ingest_sensor_data(data: SensorData):
     freq = data.adc
     temp = data.temperature
     
-    # INSTANT ZERO-HZ "AWAITING" DETECTOR & BUFFER FLUSH
-    # The moment you pull the spoon out, it destroys the old memory and switches to Standby!
-    if freq < 100:
-        freq_buffer.clear()
-        temp_buffer.clear()
-        live_z = 1500.0
-        prediction = "AWAITING SENSOR DATA..."
-        latest_payload = compute_complete_telemetry(median_freq=0.0, prediction=prediction, live_z=live_z, temp_c=temp)
-        return {"status": "awaiting", "mapped_ohms": live_z}
-
-    # If the spoon is in liquid, collect exactly 5 samples
+    # 1. Fill the Fast 10-sample rolling buffer
     freq_buffer.append(freq)
     temp_buffer.append(temp)
     
-    # Wait until we have 5 samples (Only 5 seconds)
-    if len(freq_buffer) < 5:
+    # 2. Wait until we have exactly 10 samples
+    if len(freq_buffer) < 10:
         return {"status": "buffering", "samples": len(freq_buffer)}
     
-    # Extract perfect Medians after rejecting real outliers
-    clean_freqs = filter_real_outliers(list(freq_buffer))
+    # 3. INTERQUARTILE OUTLIER REJECTION
+    # Sorts the data and drops the 2 highest and 2 lowest spikes
+    sorted_freqs = sorted(list(freq_buffer))
+    clean_freqs = sorted_freqs[2:-2]
+    
     median_freq = float(np.median(clean_freqs))
     median_temp = float(np.median(temp_buffer))
     
-    # Pure Hardware Rule Engine Voting
+    # 4. Pure Hardware Rule Engine Voting
     prediction, live_z = classify_and_map_impedance(median_freq)
 
-    # Generate the payload
+    # 5. Build and send the payload
     latest_payload = compute_complete_telemetry(
         median_freq=median_freq, 
         prediction=prediction, 
