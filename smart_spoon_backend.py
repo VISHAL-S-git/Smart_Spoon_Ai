@@ -154,7 +154,7 @@ async def health_check():
 
 @app.post("/ingest")
 async def ingest_telemetry(data: TelemetryData):
-    print(f"🔥 LIVE ESP32 DATA -> Freq: {data.get('adc')} Hz | Temp: {data.get('temperature')} C", flush=True)
+    print(f"🔥 LIVE ESP32 DATA -> Freq: {data.adc} Hz | Temp: {data.temperature} C", flush=True)
     global latest_payload, rolling_buffer
 
     # 1. Update rolling buffer
